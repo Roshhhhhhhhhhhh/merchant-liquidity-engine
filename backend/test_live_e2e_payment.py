@@ -1,10 +1,24 @@
+import sys
 import requests
 import json
+
+# Force UTF-8 output on Windows to handle currency symbols
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
 
 BASE_URL = "http://localhost:8000/api"
 
 def run_test():
-    print("1. Testing Health Endpoint...")
+    print("0. Testing Payment Configuration Status Endpoint...")
+    res = requests.get(f"{BASE_URL}/payments/status")
+    assert res.status_code == 200, f"Payment status failed: {res.text}"
+    status_data = res.json()
+    assert "configured" in status_data, "Missing 'configured' key in status response"
+    assert status_data["environment"] == "sandbox", f"Expected sandbox, got {status_data['environment']}"
+    assert "secret" not in json.dumps(status_data).lower(), "SECRET LEAKED in status response!"
+    print(f"   -> Configured: {status_data['configured']}, Environment: {status_data['environment']} (No secrets exposed: OK)")
+
+    print("\n1. Testing Health Endpoint...")
     res = requests.get(f"{BASE_URL}/health")
     assert res.status_code == 200, f"Health check failed: {res.text}"
     print(f"   -> Health OK: {res.json()}")
@@ -77,13 +91,13 @@ def run_test():
         }
     }
     headers = {"X-Razorpay-Signature": "mock_valid_webhook_signature"}
-    res1 = requests.post(f"{BASE_URL}/payments/razorpay/webhook", json=webhook_payload, headers=headers)
+    res1 = requests.post(f"{BASE_URL}/webhooks/razorpay", json=webhook_payload, headers=headers)
     assert res1.status_code == 200
-    print(f"   -> Webhook 1 Result: {res1.json()['status']} (Processed: {res1.json()['processed']})")
+    print(f"   -> Webhook 1 (/api/webhooks/razorpay) Result: {res1.json()['status']} (Processed: {res1.json()['processed']})")
 
     res2 = requests.post(f"{BASE_URL}/payments/razorpay/webhook", json=webhook_payload, headers=headers)
     assert res2.status_code == 200
-    print(f"   -> Webhook 2 (Replay) Result: {res2.json()['status']} (Processed: {res2.json()['processed']})")
+    print(f"   -> Webhook 2 Replay (/api/payments/razorpay/webhook) Result: {res2.json()['status']} (Processed: {res2.json()['processed']})")
     assert res2.json()["status"] == "duplicate_ignored", "Webhook idempotency failed!"
 
     print("\n=======================================================")
@@ -92,3 +106,4 @@ def run_test():
 
 if __name__ == "__main__":
     run_test()
+

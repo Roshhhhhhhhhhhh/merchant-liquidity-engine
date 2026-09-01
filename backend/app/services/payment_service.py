@@ -21,6 +21,7 @@ from app.models.activity import ActivityEvent
 from app.models.negotiation import NegotiationSession, NegotiationOffer
 from app.models.payment import PaymentOrder, PaymentWebhookLog
 from app.schemas.payment import (
+    PaymentConfigStatusResponse,
     PaymentOrderResponse,
     PaymentVerifyRequest,
     PaymentVerifyResponse,
@@ -30,32 +31,50 @@ from app.services.economic_state_service import EconomicStateService
 from app.services.formatters import format_inr, round_decimal
 
 
-class RazorpayClientWrapper:
+class RazorpayService:
     """
+    Dedicated Razorpay Service Abstraction.
     Manages communication with Razorpay Test Mode API and HMAC-SHA256 signature verification.
-    Provides deterministic simulation when running without configured sandbox API keys.
+    Provides lazy initialization, normalized error handling, configuration status, and sandbox simulation.
+    All Razorpay SDK interactions are strictly isolated within this service.
     """
 
     @classmethod
-    def get_client(cls) -> Optional[razorpay.Client]:
-        if (
+    def is_configured(cls) -> bool:
+        """Returns True if valid live Razorpay sandbox credentials are configured."""
+        return bool(
             settings.RAZORPAY_KEY_ID
             and settings.RAZORPAY_KEY_SECRET
             and not settings.RAZORPAY_KEY_ID.startswith("rzp_test_mock")
             and not settings.RAZORPAY_KEY_ID.startswith("rzp_test_your_key")
-        ):
+        )
+
+    @classmethod
+    def get_status(cls) -> PaymentConfigStatusResponse:
+        """Returns public configuration status without exposing sensitive credentials."""
+        return PaymentConfigStatusResponse(
+            configured=cls.is_configured(),
+            environment="sandbox",
+        )
+
+    @classmethod
+    def get_client(cls) -> Optional[razorpay.Client]:
+        """Safely and lazily initializes the Razorpay SDK client."""
+        if cls.is_configured():
             try:
                 return razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-            except Exception:
+            except Exception as e:
+                print(f"[Razorpay Service] Error initializing client: {e}")
                 return None
         return None
 
     @classmethod
     def create_test_order(cls, amount_paise: int, receipt: str, currency: str = "INR") -> Dict[str, Any]:
-        """Creates a Razorpay Test Mode order."""
+        """Creates a Razorpay Test Mode order with normalized error handling and sandbox fallback."""
         client = cls.get_client()
         if client:
             try:
+                print(f"[Razorpay Service] PROVIDER_MODE=RAZORPAY_TEST - Creating order via Razorpay API: amount={amount_paise} paise, receipt={receipt}")
                 order_data = {
                     "amount": amount_paise,
                     "currency": currency,
@@ -66,13 +85,16 @@ class RazorpayClientWrapper:
                         "environment": "Razorpay Sandbox / Test Mode",
                     },
                 }
-                return client.order.create(data=order_data)
+                rzp_order = client.order.create(data=order_data)
+                print(f"[Razorpay Service] PROVIDER_MODE=RAZORPAY_TEST - Created Razorpay Order ID: {rzp_order.get('id')}")
+                return rzp_order
             except Exception as e:
-                # Log error and fall back to valid sandbox order format
-                print(f"[Razorpay Test API] Error creating order: {e}. Generating sandbox order.")
+                print(f"[Razorpay Test API] Error creating order via API: {e}. Falling back to sandbox order.")
 
-        # Fallback Test Mode Order representation
+        # Fallback Test Mode Order representation for sandbox/testing without live keys
+        print(f"[Razorpay Service] PROVIDER_MODE=LOCAL_FALLBACK - Generating fallback test order")
         short_id = uuid.uuid4().hex[:14]
+
         return {
             "id": f"order_test_{short_id}",
             "entity": "order",
@@ -88,11 +110,11 @@ class RazorpayClientWrapper:
     @classmethod
     def verify_payment_signature(cls, order_id: str, payment_id: str, signature: str) -> bool:
         """Verifies cryptographic HMAC-SHA256 signature of Razorpay checkout."""
-        # 1. Check direct mock signatures for integration tests and sandbox testing
+        # 1. Direct mock signatures for automated testing and sandbox environments
         if signature in ("mock_valid_test_signature", "mock_signature_valid", "sandbox_test_signature"):
             return True
 
-        # 2. Check official SDK utility verification
+        # 2. Check official SDK utility verification if client is configured
         client = cls.get_client()
         if client:
             try:
@@ -124,6 +146,11 @@ class RazorpayClientWrapper:
         expected_sig = hmac.new(key=secret.encode("utf-8"), msg=raw_body_bytes, digestmod=hashlib.sha256).hexdigest()
 
         return hmac.compare_digest(expected_sig, signature)
+
+
+# Alias for backward compatibility
+RazorpayClientWrapper = RazorpayService
+
 
 
 class PaymentService:
@@ -262,8 +289,16 @@ class PaymentService:
         if not payment_order:
             raise ValueError(f"Payment order '{payload.payment_order_id}' not found.")
 
+        # Verify Razorpay order ID matches internal record
+        if payment_order.razorpay_order_id != payload.razorpay_order_id:
+            raise ValueError(
+                f"Mismatched Razorpay Order ID: Order '{payment_order.id}' is bound to "
+                f"'{payment_order.razorpay_order_id}' but received '{payload.razorpay_order_id}'."
+            )
+
         # Idempotency: If already paid, return existing completed state
         if payment_order.status == "PAID":
+
             existing_tx = (
                 db.query(Transaction)
                 .filter(Transaction.payment_order_id == payment_order.id)
@@ -431,6 +466,10 @@ class PaymentService:
             created_at=now,
         )
         db.add(activity)
+
+        # Flush so the new EconomicSnapshot is visible to queries within this
+        # transaction before we recalculate state (fixes zero-delta on immediate payments).
+        db.flush()
 
         # 5. Calculate "AFTER" Economic State
         after_state = EconomicStateService.calculate_current_state(db=db, merchant_id=payment_order.merchant_id)

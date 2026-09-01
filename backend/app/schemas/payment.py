@@ -4,8 +4,14 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 
+class PaymentConfigStatusResponse(BaseModel):
+    configured: bool
+    environment: str = "sandbox"
+
+
 class PaymentOrderCreateRequest(BaseModel):
     negotiation_id: str = Field(..., description="ID of the accepted negotiation session")
+
 
 
 class PaymentOrderResponse(BaseModel):

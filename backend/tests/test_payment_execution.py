@@ -226,7 +226,7 @@ def test_payment_api_endpoints_full_lifecycle(client):
     assert verify_data["status"] == "PAID"
     assert len(verify_data["metrics_comparison"]) >= 4
 
-    # 5. Webhook endpoint
+    # 5. Webhook endpoint (both /api/payments/razorpay/webhook and /api/webhooks/razorpay)
     whk_res = client.post(
         "/api/payments/razorpay/webhook",
         headers={"X-Razorpay-Signature": "mock_valid_webhook_signature"},
@@ -246,3 +246,114 @@ def test_payment_api_endpoints_full_lifecycle(client):
     )
     assert whk_res.status_code == 200
     assert whk_res.json()["processed"] is True
+
+    # 6. Direct webhook endpoint /api/webhooks/razorpay
+    whk_direct_res = client.post(
+        "/api/webhooks/razorpay",
+        headers={"X-Razorpay-Signature": "mock_valid_webhook_signature"},
+        json={
+            "id": "evt_api_test_direct_002",
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_whk_api_direct_002",
+                        "order_id": razorpay_order_id,
+                        "status": "captured",
+                    }
+                }
+            }
+        },
+    )
+    assert whk_direct_res.status_code == 200
+    assert whk_direct_res.json()["processed"] is True
+
+
+def test_rejected_negotiation_cannot_create_payment_order(db):
+    session_res = NegotiationService.run_demo_scenario(db=db, merchant_id="mch_aarav_001")
+    # Manually mark as REJECTED
+    session = db.query(NegotiationSession).filter(NegotiationSession.id == session_res.id).first()
+    session.status = "REJECTED"
+    db.commit()
+
+    with pytest.raises(ValueError, match="Only ACCEPTED negotiations can proceed to payment"):
+        PaymentService.create_payment_order(db=db, negotiation_id=session.id)
+
+
+def test_already_paid_negotiation_cannot_create_second_order(db):
+    session_res = NegotiationService.run_demo_scenario(db=db, merchant_id="mch_aarav_001")
+    payment_res = PaymentService.create_payment_order(db=db, negotiation_id=session_res.id)
+
+    # Verify and pay
+    verify_req = PaymentVerifyRequest(
+        payment_order_id=payment_res.id,
+        razorpay_order_id=payment_res.razorpay_order_id,
+        razorpay_payment_id="pay_test_dup_check",
+        razorpay_signature="mock_valid_test_signature",
+    )
+    PaymentService.verify_payment_and_execute(db=db, payload=verify_req)
+
+    # Attempting second order creation must be rejected
+    with pytest.raises(ValueError, match="has already been paid"):
+        PaymentService.create_payment_order(db=db, negotiation_id=session_res.id)
+
+
+def test_insufficient_inventory_blocks_payment_order(db):
+    session_res = NegotiationService.run_demo_scenario(db=db, merchant_id="mch_aarav_001")
+    offer = db.query(NegotiationOffer).filter(NegotiationOffer.id == session_res.current_offer.id).first()
+    inv_item = db.query(InventoryItem).filter(InventoryItem.product_id == offer.product_id).first()
+
+    # Set inventory to 0
+    orig_qty = inv_item.available_quantity
+    inv_item.available_quantity = 0
+    db.commit()
+
+    try:
+        with pytest.raises(ValueError, match="Insufficient warehouse stock"):
+            PaymentService.create_payment_order(db=db, negotiation_id=session_res.id)
+    finally:
+        inv_item.available_quantity = orig_qty
+        db.commit()
+
+
+def test_invalid_webhook_signature_rejected(db):
+    webhook_payload = {
+        "id": "evt_fraud_webhook_001",
+        "event": "payment.captured",
+        "payload": {},
+    }
+    body_bytes = json.dumps(webhook_payload).encode("utf-8")
+
+    with pytest.raises(ValueError, match="Invalid Razorpay webhook signature"):
+        PaymentService.process_webhook(
+            db=db,
+            raw_body_bytes=body_bytes,
+            signature="forged_webhook_signature_123",
+        )
+
+
+def test_payment_status_endpoint(client):
+    res = client.get("/api/payments/status")
+    assert res.status_code == 200
+    data = res.json()
+    assert "configured" in data
+    assert data["environment"] == "sandbox"
+    assert "secret" not in json.dumps(data).lower()
+    assert "key_secret" not in json.dumps(data).lower()
+
+
+def test_mismatched_order_verification_rejected(db):
+    session_res = NegotiationService.run_demo_scenario(db=db, merchant_id="mch_aarav_001")
+    payment_res = PaymentService.create_payment_order(db=db, negotiation_id=session_res.id)
+
+    verify_req = PaymentVerifyRequest(
+        payment_order_id=payment_res.id,
+        razorpay_order_id="order_mismatched_wrong_id_999",
+        razorpay_payment_id="pay_test_mismatch_123",
+        razorpay_signature="mock_valid_test_signature",
+    )
+
+    with pytest.raises(ValueError, match="Mismatched Razorpay Order ID|Cryptographic Razorpay payment signature verification failed|not found"):
+        PaymentService.verify_payment_and_execute(db=db, payload=verify_req)
+
+

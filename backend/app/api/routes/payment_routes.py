@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database.session import get_db
 from app.schemas.payment import (
+    PaymentConfigStatusResponse,
     PaymentOrderCreateRequest,
     PaymentOrderResponse,
     PaymentVerifyRequest,
@@ -11,12 +12,22 @@ from app.schemas.payment import (
     PaymentDetailsResponse,
     WebhookResponse,
 )
-from app.services.payment_service import PaymentService
+from app.services.payment_service import PaymentService, RazorpayService
 
 router = APIRouter(tags=["Payments & Settlement"])
 
 
+@router.get("/status", response_model=PaymentConfigStatusResponse, summary="Get Razorpay Payment Integration Configuration Status")
+def get_payment_status():
+    """
+    Returns public Razorpay configuration status (configured boolean & environment)
+    without exposing any sensitive credentials or secrets.
+    """
+    return RazorpayService.get_status()
+
+
 @router.post("/orders", response_model=PaymentOrderResponse, summary="Create Razorpay Test Mode Order from Accepted Negotiation")
+
 def create_payment_order(
     payload: PaymentOrderCreateRequest,
     db: Session = Depends(get_db),
@@ -120,7 +131,8 @@ def get_payment_order(
     }
 
 
-@router.post("/razorpay/webhook", response_model=WebhookResponse, summary="Razorpay Webhook Handler with Idempotency")
+@router.post("/razorpay", response_model=WebhookResponse, summary="Razorpay Webhook Handler with Idempotency")
+@router.post("/razorpay/webhook", response_model=WebhookResponse, summary="Razorpay Webhook Handler with Idempotency (Legacy Alias)")
 async def razorpay_webhook(
     request: Request,
     x_razorpay_signature: Optional[str] = Header(None),

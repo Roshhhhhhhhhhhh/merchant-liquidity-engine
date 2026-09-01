@@ -28,7 +28,9 @@ import type {
   PaymentVerifyRequest,
   PaymentVerifyResponse,
   PaymentDetailsResponse,
+  PaymentConfigStatusResponse,
 } from '@/types'
+
 
 // Use relative /api to leverage Vite proxy in development, or explicit env variable
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
@@ -231,7 +233,13 @@ export const api = {
   },
 
   // Payment & Execution (Phase 5)
+  getPaymentStatus: async (): Promise<PaymentConfigStatusResponse> => {
+    const res = await apiClient.get<PaymentConfigStatusResponse>('/payments/status')
+    return res.data
+  },
+
   createPaymentOrder: async (negotiationId: string): Promise<PaymentOrder> => {
+
     const res = await apiClient.post<PaymentOrder>('/payments/orders', {
       negotiation_id: negotiationId,
     })

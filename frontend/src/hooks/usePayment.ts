@@ -35,7 +35,16 @@ export function loadRazorpayScript(): Promise<boolean> {
   })
 }
 
+export function usePaymentStatus() {
+  return useQuery({
+    queryKey: ['payment-status'],
+    queryFn: () => api.getPaymentStatus(),
+    staleTime: 60000,
+  })
+}
+
 export function useCreatePaymentOrder() {
+
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (negotiationId: string) => api.createPaymentOrder(negotiationId),

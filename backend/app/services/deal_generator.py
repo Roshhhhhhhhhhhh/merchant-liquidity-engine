@@ -117,27 +117,39 @@ class DealCandidateGenerator:
         }
 
         # -------------------------------------------------------------
-        # Candidate D: Aging Inventory Clearance / Liquidation Bundle
+        # Candidate D: Aging Inventory Clearance (when eligible) or Liquidity Sale
+        # "Aging Clearance" is ONLY assigned when inventory satisfies the
+        # configured threshold (days_in_stock > 45 or status Aging/Critical).
+        # For fresh stock the deal becomes a "Liquidity Sale" with a 9% prompt-pay
+        # discount but zero aging-reduction units so metrics stay truthful.
         # -------------------------------------------------------------
         discount_d_pct = Decimal("9.0")
         price_d = round_decimal(catalog_price * (Decimal("1.0") - (discount_d_pct / Decimal("100.0"))), 2)
-        if price_d < unit_cost * Decimal("1.05"):  # Clearance floor
+        if price_d < unit_cost * Decimal("1.05"):  # Clearance / margin floor
             price_d = round_decimal(unit_cost * Decimal("1.05"), 2)
 
-        aging_units_to_clear = qty if is_aging else int(qty * 0.7)
+        # Aging relief units are non-zero ONLY when the SKU is genuinely aging.
+        aging_units_to_clear = qty if is_aging else 0
 
         deal_d = {
-            "id": "cand_d_aging_clearance",
-            "label": "Deal D • Aging Stock Clearance",
-            "strategy_tag": "Aging Clearance",
-            "action_type": "inventory_liquidation",
+            "id": "cand_d_aging_clearance" if is_aging else "cand_d_liquidity_sale",
+            "label": "Deal D • Aging Stock Clearance" if is_aging else "Deal D • Liquidity Sale",
+            "strategy_tag": "Aging Clearance" if is_aging else "Liquidity Sale",
+            "action_type": "inventory_liquidation" if is_aging else "price_change",
             "product_id": product.id,
             "quantity": qty,
             "unit_price": price_d,
             "payment_timing_days": 0,  # Immediate settlement
             "delivery_days": min(request.max_delivery_days, 4),
             "target_aging_reduction_units": aging_units_to_clear,
-            "description": f"Targeted liquidation of aged inventory units at clearance price {price_d}/unit with 100% immediate cash settlement.",
+            "description": (
+                f"Targeted liquidation of aged inventory ({aging_units_to_clear} units, {inv_item.days_in_stock}d old) "
+                f"at clearance price {price_d}/unit with 100% immediate cash settlement."
+                if is_aging
+                else f"Liquidity-accelerating sale at {price_d}/unit (9% prompt-pay discount) "
+                f"with 100% immediate cash settlement. SKU age {inv_item.days_in_stock if inv_item else 'N/A'}d "
+                f"is below the aging threshold — no aging-relief credit applied."
+            ),
         }
 
         return [deal_a, deal_b, deal_c, deal_d]

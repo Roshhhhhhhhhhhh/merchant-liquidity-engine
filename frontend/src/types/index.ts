@@ -839,3 +839,9 @@ export interface PaymentDetailsResponse {
   realized_evc?: number
 }
 
+export interface PaymentConfigStatusResponse {
+  configured: boolean
+  environment: string
+}
+
+
