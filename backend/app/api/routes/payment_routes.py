@@ -141,9 +141,15 @@ async def razorpay_webhook(
     """
     Receives incoming Razorpay webhook events, validates cryptographic authenticity,
     and applies idempotent payment confirmation without duplicate state transitions.
+    
+    NOTE: A missing signature in production is an error condition. The webhook MUST include
+    the X-Razorpay-Signature header. No fallback to mock signatures for unsigned requests.
     """
     body_bytes = await request.body()
-    sig = x_razorpay_signature or "mock_valid_webhook_signature"
+    sig = x_razorpay_signature
+    
+    if not sig:
+        raise HTTPException(status_code=401, detail="Missing X-Razorpay-Signature header. Webhook signature is required.")
 
     try:
         result = PaymentService.process_webhook(db=db, raw_body_bytes=body_bytes, signature=sig)
